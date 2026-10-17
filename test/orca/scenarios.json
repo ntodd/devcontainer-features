@@ -1,0 +1,12 @@
+{
+  "pinned": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "orca": {
+        "version": "1.4.229",
+        "port": "6800",
+        "pairingAddress": "orca-test.example"
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "id": "orca",
+  "version": "1.0.0",
+  "name": "Orca runtime",
+  "description": "Runs the container's own headless Orca runtime (orca serve), installing and updating Orca in the user's home on every start, so a new Orca release takes a restart rather than an image rebuild.",
+  "documentationURL": "https://github.com/ntodd/devcontainer-features/tree/main/src/orca",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "latest",
+      "proposals": ["latest"],
+      "description": "Orca version to run. 'latest' tracks GitHub releases, which is what the desktop app auto-updates to; pin one (say 1.4.229) to hold it. ORCA_VERSION overrides it at runtime."
+    },
+    "port": {
+      "type": "string",
+      "default": "6768",
+      "description": "Port the runtime listens on inside the container. ORCA_SERVE_PORT overrides it at runtime."
+    },
+    "pairingAddress": {
+      "type": "string",
+      "default": "",
+      "description": "Address clients reach the runtime at, advertised in pairing offers. Empty uses TS_HOSTNAME (a Foreman environment's tailnet name), else 127.0.0.1. ORCA_PAIRING_ADDRESS overrides it at runtime."
+    }
+  },
+  "init": true,
+  "postStartCommand": "/usr/local/bin/orca-serve || true",
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/common-utils",
+    "ghcr.io/devcontainers/features/node"
+  ]
+}
