@@ -60,6 +60,15 @@ it again, taking any staged update. It kills running agents. Use it rather than
 `pkill -f <path>` over ssh: that pattern is on the ssh shell's own command line,
 so it kills your session too.
 
+## After a rebuild
+
+`$HOME` is usually a named volume, so a rebuilt container finds whatever the
+last one's runtime left in the profile. When nothing is serving, `orca-serve`
+treats all of it as stale: it kills orphaned runtime processes, removes the
+`Singleton*` files, `orcad.lock` and `o-*.sock`, and starts the supervised
+runtime with `--force`, so the supervisor's give-up record (6 failures in 15
+minutes) from the old container doesn't stop the new one.
+
 ## Runtime overrides
 
 Environment variables override the options at runtime:
