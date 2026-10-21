@@ -97,19 +97,24 @@ if pgrep -f -- "$RUNTIME_ROOT/" >/dev/null ||
   done
 fi
 
-# Nothing is serving, so anything still running from this runtime is an orphan
-# and any Singleton* files are stale. Those files live in $HOME, usually a named
-# volume, so they outlive the container that wrote them: after a rebuild
-# every launch exits with "another Orca instance is already running" and the
-# runtime silently never comes up. Both cleanups are safe only because the port
-# check above failed. Matched on paths rather than process names, so nothing
-# else named orca-ide is caught: the runtime root, and orcad, which serve deploys
-# into the profile with its own Node and detaches (parent PID 1).
+# Nothing is serving, so anything still running from this runtime is an orphan,
+# and every lock and socket a runtime keeps in the profile is stale: the
+# Singleton* files, orcad's lock and its o-*.sock sockets. They live in $HOME,
+# usually a named volume, so they outlive the container that wrote them. A
+# rebuilt container shares the host's kernel, so orcad's lock even has the right
+# boot id, and the dead process's pid can belong to something else by now: every
+# launch then exits as if another runtime held the profile, and the runtime
+# never comes up. These cleanups are safe only because the port check above
+# failed. Matched on paths rather than process names, so nothing else named
+# orca-ide is caught: the runtime root, and orcad, which serve deploys into the
+# profile with its own Node and detaches (parent PID 1).
 pkill -9 -f -- "$RUNTIME_ROOT/" 2>/dev/null || true
 pkill -9 -f -- "$HOME/.config/orca/orcad-artifacts/" 2>/dev/null || true
 rm -f "$HOME/.config/orca/SingletonLock" \
       "$HOME/.config/orca/SingletonSocket" \
-      "$HOME/.config/orca/SingletonCookie"
+      "$HOME/.config/orca/SingletonCookie" \
+      "$HOME/.config/orca/orcad.lock" \
+      "$HOME/.config/orca"/o-*.sock
 
 # Install or update before starting. Nothing is serving, so this is the one
 # point where switching versions can't split the server from the CLI it hands
@@ -132,6 +137,11 @@ RUNTIME=$(readlink -f "$RUNTIME_ROOT/current")
 #                          pair the desktop first. Existing pairings keep working.
 # Pairing mode doesn't restart a crashed server; the next start after a device
 # has connected is supervised.
+#
+# The supervisor gives up after 6 failures in 15 minutes and refuses supervised
+# starts until --force. That record is in the profile too, so it can be about a
+# previous container's runtime, which held a lock this one didn't have. Nothing
+# is running now, so this is a fresh start, and --force lets it try.
 SERVE_ARGS=(--no-sandbox --port "$PORT" --pairing-address "$PAIRING_ADDRESS")
 if [ -n "${ORCA_MOBILE_PAIRING:-}" ]; then
   SERVE_ARGS+=(--mobile-pairing)
@@ -140,7 +150,7 @@ elif [ -n "${ORCA_PAIRING:-}" ] ||
   ! grep -Eqs '"lastSeenAt": *[1-9]' "$HOME/.config/orca/orca-devices.json"; then
   mode=pairing
 else
-  SERVE_ARGS+=(--supervise)
+  SERVE_ARGS+=(--supervise --force)
   mode=supervised
 fi
 
