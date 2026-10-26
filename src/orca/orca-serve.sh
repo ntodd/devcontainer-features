@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Start this container's own Orca runtime. The feature runs it as its
-# postStartCommand; run `orca-serve --restart` by hand to restart it.
+# postStartCommand; run `orca-serve --restart` by hand to restart it, and
+# `orca-serve --pair desktop|mobile` for a pairing offer (see below).
 #
 # Why in the container rather than on the host: Orca resolves SSH targets from
 # the *client*, not from the runtime, so "host runtime + SSH into the container"
@@ -50,12 +51,13 @@ fi
 RUNTIME_ROOT="${ORCA_RUNTIME_ROOT:-$HOME/.local/share/orca-runtime}"
 LOG="$HOME/orca-serve.log"
 
-# --restart stops this environment's runtime, then starts it as below: to leave
-# pairing mode, pair another device, or take a staged update. It kills running
-# agents. TERM first so orcad releases its instance lock cleanly. Use this
-# rather than pkill -f over ssh, which matches and kills the ssh session's own
-# shell, since the pattern is on its command line.
-if [ "${1:-}" = --restart ]; then
+DEVICES="$HOME/.config/orca/orca-devices.json"
+STATE="$HOME/.local/state/orca-feature"
+WATCHER="$STATE/pairing-watch.pid"
+
+# Stops this environment's runtime. TERM first so orcad releases its instance
+# lock cleanly.
+stop_runtime() {
   pkill -TERM -f -- "$RUNTIME_ROOT/" 2>/dev/null
   pkill -TERM -f -- "$HOME/.config/orca/orcad-artifacts/" 2>/dev/null
   for _ in $(seq 1 15); do
@@ -65,7 +67,140 @@ if [ "${1:-}" = --restart ]; then
   pkill -9 -f -- "$RUNTIME_ROOT/" 2>/dev/null
   pkill -9 -f -- "$HOME/.config/orca/orcad-artifacts/" 2>/dev/null
   sleep 1
+}
+
+# An offer's code is base64url JSON; the device it pairs is its pairedDeviceId.
+offer_payload() {
+  printf '%s' "${1#*code=}" | tr '_-' '/+' |
+    { read -r c; while [ $((${#c} % 4)) -ne 0 ]; do c="$c="; done; printf '%s' "$c"; } |
+    base64 -d 2>/dev/null
+}
+
+offer_device() {
+  offer_payload "$1" | grep -o '"pairedDeviceId":"[^"]*"' | cut -d'"' -f4
+}
+
+# A process's start time, which with its pid tells it apart from a later
+# process given the same pid. The pid file is in HOME, a volume that outlives
+# the container and its processes.
+proc_start() {
+  local stat
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  # After the command name, which is in parentheses and can hold spaces.
+  # shellcheck disable=SC2086 # the fields are what's wanted
+  set -- ${stat##*) }
+  printf '%s' "${20}"
+}
+
+# The pairing URL a runtime printed, from complete lines only: a line still
+# being written could hold half a code, and read fails on one without its
+# newline. Its code has to decode to a JSON object.
+log_offer() {
+  local line offer=
+  [ -r "$LOG" ] || return 0
+  while IFS= read -r line; do
+    if [[ $line =~ ^Pairing\ URL:\ (orca://pair\?code=[A-Za-z0-9_-]+=*)$ ]]; then
+      offer=${BASH_REMATCH[1]}
+    fi
+  done <"$LOG"
+  [ -n "$offer" ] && offer_payload "$offer" | grep -q '^{.*}$' && printf '%s' "$offer"
+}
+
+# Whether a device has connected: orcad keeps every offer in orca-devices.json,
+# with lastSeenAt 0 until it's used. Read as flat objects, so formatting
+# doesn't matter.
+device_seen() {
+  tr -d '\n' 2>/dev/null <"$DEVICES" | grep -o '{[^{}]*}' | grep -F "\"$1\"" |
+    grep -Eq '"lastSeenAt": *[1-9]'
+}
+
+# --watch-pairing <device>: started in the background by --pair. Pairing mode
+# isn't supervised, so once the offer has been used this restarts the runtime,
+# which a used offer makes supervised. One never used is left as it is after
+# ORCA_PAIRING_WATCH_SECONDS: a restart then would kill agents started since.
+if [ "${1:-}" = --watch-pairing ]; then
+  device=${2:?--watch-pairing needs a device id}
+  interval=${ORCA_PAIRING_WATCH_INTERVAL:-2}
+  deadline=$(( $(date +%s) + ${ORCA_PAIRING_WATCH_SECONDS:-900} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    if device_seen "$device"; then
+      # --pair exported these for its own start; this one is the opposite.
+      # Same pid, so it's still the watcher while it waits for the lock.
+      unset ORCA_PAIRING ORCA_MOBILE_PAIRING
+      exec bash "$0" --watcher-restart
+    fi
+    sleep "$interval"
+  done
+  pid=
+  read -r pid _ 2>/dev/null <"$WATCHER"
+  [ "${pid:-}" = "$$" ] && rm -f "$WATCHER"
+  exit 0
 fi
+
+# One start, stop or pairing at a time: two would kill each other's runtime
+# and read each other's offer. Held until this exits, and closed (9>&-) for
+# everything it leaves running.
+mkdir -p "$STATE"
+exec 9>"$STATE/lifecycle.lock"
+if ! flock -w "${ORCA_LOCK_WAIT:-300}" 9; then
+  echo "orca-serve: another orca-serve is still starting or pairing" >&2
+  exit 1
+fi
+
+# Anything that replaces the runtime stops the watcher, which would
+# otherwise restart the replacement. Only the process it recorded: same pid,
+# same start time, and still a watcher.
+stop_watcher() {
+  local pid='' start=''
+  read -r pid start 2>/dev/null <"$WATCHER"
+  if [ -n "$pid" ] && [ "$pid" != "$$" ] && [ "$(proc_start "$pid")" = "$start" ] &&
+    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -Eq -- '--watch-pairing|--watcher-restart'; then
+    kill "$pid" 2>/dev/null
+  fi
+  rm -f "$WATCHER"
+}
+
+# --pair desktop|mobile: a pairing offer for another client, printed to stdout
+# as one line of JSON ({"value", "qr", "note"}) and nothing else, which is what
+# Foreman's connect hook hands back. Orca only prints an offer from an
+# unsupervised start, so this restarts the runtime into pairing mode, which
+# kills running agents, and leaves a watcher to restart it supervised once the
+# offer is used. Existing pairings keep working. The offer is a bearer secret:
+# it goes to stdout only, never to stderr.
+# The watcher's restart, once it has the lock: only if nothing cancelled it
+# while it waited (a pairing or restart that got there first).
+if [ "${1:-}" = --watcher-restart ]; then
+  pid=''
+  read -r pid _ 2>/dev/null <"$WATCHER"
+  [ "$pid" = "$$" ] || exit 0
+  set -- --restart
+fi
+
+pair=
+case "${1:-}" in
+  --pair)
+    case "${2:-}" in
+      desktop) export ORCA_PAIRING=1; unset ORCA_MOBILE_PAIRING ;;
+      mobile) export ORCA_MOBILE_PAIRING=1; unset ORCA_PAIRING ;;
+      *) echo "usage: orca-serve --pair desktop|mobile" >&2; exit 2 ;;
+    esac
+    pair=$2
+    # Everything but the offer goes to stderr.
+    exec 3>&1 1>&2
+    stop_watcher
+    stop_runtime
+    # The last offer is in here, and it's no answer to this one.
+    rm -f "$LOG"
+    ;;
+  # Restarts the runtime as below: to leave pairing mode, or take a staged
+  # update. It kills running agents. Use this rather than pkill -f over ssh,
+  # which matches and kills the ssh session's own shell, since the pattern is
+  # on its command line.
+  --restart)
+    stop_watcher
+    stop_runtime
+    ;;
+esac
 
 # Guard on the port rather than on a process name. postStartCommand runs on
 # every container start, and a pgrep-based check both races a process that is
@@ -108,6 +243,7 @@ fi
 # failed. Matched on paths rather than process names, so nothing else named
 # orca-ide is caught: the runtime root, and orcad, which serve deploys into the
 # profile with its own Node and detaches (parent PID 1).
+stop_watcher
 pkill -9 -f -- "$RUNTIME_ROOT/" 2>/dev/null || true
 pkill -9 -f -- "$HOME/.config/orca/orcad-artifacts/" 2>/dev/null || true
 rm -f "$HOME/.config/orca/SingletonLock" \
@@ -154,9 +290,46 @@ else
   mode=supervised
 fi
 
-setsid env -u DISPLAY "$RUNTIME/AppRun" serve "${SERVE_ARGS[@]}" >"$LOG" 2>&1 </dev/null &
+# In pairing mode the log holds a live offer, so only this user reads it,
+# whatever the umask.
+(umask 077 && : >>"$LOG") && chmod 600 "$LOG"
+
+# 3>&-: under --pair, fd 3 is the caller's stdout, and a runtime holding it
+# open would keep the caller waiting for the end of the offer. 9>&-: the lock.
+setsid env -u DISPLAY "$RUNTIME/AppRun" serve "${SERVE_ARGS[@]}" >"$LOG" 2>&1 </dev/null 3>&- 9>&- &
 
 echo "orca runtime $(basename "$RUNTIME") starting on :$PORT ($mode)"
-if [ "$mode" = pairing ]; then
-  echo "pairing offer will appear in $LOG; it's a bearer secret. Pair, then run orca-serve --restart"
+if [ -z "$pair" ]; then
+  if [ "$mode" = pairing ]; then
+    echo "pairing offer will appear in $LOG; it's a bearer secret. Pair, then run orca-serve --restart"
+  fi
+  exit 0
 fi
+
+offer=
+deadline=$(( $(date +%s) + ${ORCA_PAIRING_WAIT:-120} ))
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  offer=$(log_offer)
+  [ -n "$offer" ] && break
+  sleep 0.5
+done
+# Not the log's tail: in pairing mode it can hold the offer's QR code.
+if [ -z "$offer" ]; then
+  echo "orca-serve: no pairing offer after ${ORCA_PAIRING_WAIT:-120}s; see $LOG" >&2
+  exit 1
+fi
+
+device=$(offer_device "$offer")
+if [ -n "$device" ]; then
+  setsid bash "$0" --watch-pairing "$device" >/dev/null 2>&1 </dev/null 3>&- 9>&- &
+  echo "$! $(proc_start $!)" >"$WATCHER"
+else
+  echo "orca-serve: couldn't read the offer's device; run orca-serve --restart once it's paired" >&2
+fi
+
+if [ "$pair" = mobile ]; then
+  qr=true note="Scan it with the Orca app on your phone."
+else
+  qr=false note="In Orca, add a remote environment and paste this pairing code."
+fi
+printf '{"value":"%s","qr":%s,"note":"%s"}\n' "$offer" "$qr" "$note" >&3
