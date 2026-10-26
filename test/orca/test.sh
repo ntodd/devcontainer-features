@@ -57,4 +57,33 @@ check "supervisor restarts a killed orcad" bash -c "
 check "orcad came back as a new process" bash -c \
   "new=\$(awk -F'[:,]' '/\"pid\"/ { print \$2; exit }' '$HOME/.config/orca/orcad.lock'); [ \"\$new\" != '$orcad' ]"
 
+# Foreman's connect hook: an offer for another desktop, a real client pairing
+# with it, and the runtime back to supervised once it has.
+HOOK=/usr/local/share/foreman/connect.d/orca
+check "connect hook is installed" test -x "$HOOK"
+check "connect hook lists its actions" bash -c "$HOOK describe | grep -q '\"id\":\"desktop\"'"
+offer=$(timeout 300 "$HOOK" run desktop 2>/dev/null)
+code=$(printf '%s' "$offer" | grep -o 'orca://pair?code=[A-Za-z0-9_=-]*')
+check "connect hook prints a desktop offer" bash -c "[ -n '$code' ]"
+check "the runtime is in pairing mode for it" bash -c "! grep -q 'hidden because this supervised server' '$LOG'"
+client=$(mktemp -d)
+check "a client pairs with the offer" bash -c \
+  "HOME='$client' orca environment add --name self --pairing-code '$code' >/dev/null 2>&1"
+# `environment add` only saves it; the desktop app connects straight away,
+# and this stands in for that. Not checked: the runtime restarts once the
+# offer is used, and this can race it.
+HOME=$client orca status --environment self >/dev/null 2>&1
+check "the runtime goes back to supervised once it's used" bash -c "
+  for _ in \$(seq 1 90); do
+    grep -q 'hidden because this supervised server' '$LOG' && exit 0
+    sleep 1
+  done
+  exit 1"
+check "the client reconnects to the supervised runtime" bash -c "
+  for _ in \$(seq 1 60); do
+    HOME='$client' orca status --environment self 2>/dev/null | grep -q 'ConnectionState: connected' && exit 0
+    sleep 1
+  done
+  exit 1"
+
 reportResults

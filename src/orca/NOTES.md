@@ -37,21 +37,37 @@ log never holds a live bearer offer. `orca-serve` therefore starts in **pairing
 mode** (unsupervised, offer in `~/orca-serve.log`) until some device has
 connected, and supervised on every start after that.
 
-From the desktop:
+In a Foreman environment, the environment's page has **Pair a desktop** and
+**Pair a phone** buttons (see below). Elsewhere, ask for an offer over SSH:
 
 ```bash
-code=$(ssh <user>@<host> "grep -o 'orca://pair?code=[^ ]*' ~/orca-serve.log | tail -1")
+code=$(ssh <user>@<host> orca-serve --pair desktop | grep -o 'orca://pair?code=[^"]*')
 orca environment add --name <name> --pairing-code "$code"
-ssh <user>@<host> orca-serve --restart        # now supervised
 ```
 
-The code is a bearer secret. Pairing mode doesn't restart a crashed server, so
-restart into supervised mode straight after pairing.
+`orca-serve --pair desktop|mobile` restarts the runtime into pairing mode, which
+stops its running agents, and prints the offer as one line of JSON on stdout
+(`{"value": "orca://pair?code=…", "qr": false, "note": "…"}`; `qr` is true for
+a phone, whose app scans the same URL as a QR code). Existing pairings keep
+working, and paired clients reconnect. It leaves a watcher behind that restarts
+the runtime supervised as soon as the offer is used, since pairing mode doesn't
+restart a crashed server. An offer that's never used leaves the runtime in
+pairing mode until it next restarts: the watcher gives up after 15 minutes
+(`ORCA_PAIRING_WATCH_SECONDS`) rather than kill agents started since. Until an
+offer is used, asking again gets the same one, so unused offers don't pile up.
 
-- **Phone:** after the desktop is paired, run `ORCA_MOBILE_PAIRING=1 orca-serve --restart`,
-  scan the QR in `~/orca-serve.log`, then `orca-serve --restart`. The mobile and
-  desktop offers are one or the other, and existing pairings keep working.
-- **Another desktop:** `ORCA_PAIRING=1 orca-serve --restart`.
+The code is a bearer secret. `--pair` prints it to stdout only; the runtime
+also writes it to `~/orca-serve.log` (mode 0600) while in pairing mode. One
+`orca-serve` start, restart or pairing runs at a time, and a restart by hand
+cancels a pending watcher.
+
+### Foreman
+
+The feature installs a Foreman connect hook at
+`/usr/local/share/foreman/connect.d/orca`. Foreman finds it when the environment
+comes up and lists its actions on the environment's page; running one shows the
+offer, with a QR code for a phone, to the environment's owner. Outside Foreman
+nothing reads it.
 
 ## Restarting
 

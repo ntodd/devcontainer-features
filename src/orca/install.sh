@@ -11,6 +11,8 @@
 #   - orca-serve and orca-install under /usr/local/share/orca-feature, with
 #     orca-serve on PATH
 #   - orca and orca-ide on PATH, pointing into the remote user's install
+#   - Foreman's connect hook, so a Foreman environment's page can pair Orca
+#     clients (inert anywhere else)
 set -eu
 
 VERSION=${VERSION:-latest}
@@ -65,6 +67,11 @@ mkdir -p "$share"
 install -m 0755 "$here/orca-serve.sh" "$share/orca-serve.sh"
 install -m 0755 "$here/orca-install.sh" "$share/orca-install.sh"
 ln -sf "$share/orca-serve.sh" /usr/local/bin/orca-serve
+
+# Foreman runs connect.d/<name> in an environment to list and run its actions
+# (here, pairing another Orca client). Nothing else reads it.
+mkdir -p /usr/local/share/foreman/connect.d
+install -m 0755 "$here/foreman-connect.sh" /usr/local/share/foreman/connect.d/orca
 
 # Options the scripts read at runtime as defaults. A repo sets these, so each
 # value is single-quoted for sourcing.
