@@ -1,6 +1,6 @@
 {
   "id": "orca",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "name": "Orca runtime",
   "description": "Runs the container's own headless Orca runtime (orca serve), installing and updating Orca in the user's home on every start, so a new Orca release takes a restart rather than an image rebuild.",
   "documentationURL": "https://github.com/ntodd/devcontainer-features/tree/main/src/orca",
