@@ -45,7 +45,22 @@ pick() {
   return 1
 }
 
-packages="ca-certificates curl procps util-linux xvfb xauth dbus
+# GTK pulls in dbus and systemd (through dconf's session bus), whose packages
+# add the messagebus and systemd-network system users. Left to themselves they
+# take uids like 996, and on a Foreman box the agent's own user can have that
+# uid: the devcontainer CLI then can't move the remote user onto it, so the
+# workspace isn't writable. Made here first, out of the system range, the
+# packages adopt them.
+for user in messagebus:60001:/nonexistent systemd-network:60002:/; do
+  name=${user%%:*} id=${user#*:} id=${id%%:*} home=${user##*:}
+  if ! getent passwd "$name" >/dev/null; then
+    getent group "$name" >/dev/null || groupadd --system --gid "$id" "$name"
+    useradd --system --uid "$id" --gid "$name" --no-create-home --home-dir "$home" \
+      --shell /usr/sbin/nologin "$name"
+  fi
+done
+
+packages="ca-certificates curl procps util-linux xvfb xauth libdbus-1-3
   libnss3 libnspr4 libdrm2 libgbm1 libxcomposite1 libxdamage1 libxfixes3
   libxrandr2 libxkbcommon0 libpango-1.0-0 libcairo2 libxshmfence1 libx11-xcb1
   libxcb-dri3-0 libexpat1"
@@ -56,10 +71,21 @@ for pair in libglib2.0-0t64:libglib2.0-0 libatk1.0-0t64:libatk1.0-0 \
   packages="$packages $(pick "${pair%%:*}" "${pair#*:}")"
 done
 
+# System users (uid 100-999) the packages add, for the warning below.
+system_users() { awk -F: '$3 >= 100 && $3 < 1000 { print $1 "=" $3 }' /etc/passwd | sort; }
+users_before=$(system_users)
+
 # shellcheck disable=SC2086 # word splitting is the point
 apt-get install -y --no-install-recommends $packages
 apt-get clean
 rm -rf /var/lib/apt/lists/*
+
+# Any system user a package added can collide with the host user the remote
+# user's uid is mapped to, as messagebus did (above).
+system_users | grep -vxF "$users_before" | grep -v "^${_REMOTE_USER:-}=" |
+  while read -r user; do
+    echo "orca feature: warning: a package added system user $user, which can stop the devcontainer CLI giving the remote user that uid" >&2
+  done
 
 # --- scripts ----------------------------------------------------------------
 
