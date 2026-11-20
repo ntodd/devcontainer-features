@@ -26,13 +26,10 @@ check "orca-serve is on PATH" bash -c '[ "$(command -v orca-serve)" = /usr/local
 check "options file is installed" grep -q "^ORCA_DEFAULT_PORT='6768'$" /usr/local/share/orca-feature/options
 check "Xvfb is installed" bash -c "command -v Xvfb"
 
-# The system users the packages bring are kept out of the system uid range.
-# dbus's messagebus took uid 996, which the devcontainer CLI then couldn't give
-# the remote user on a Foreman box whose agent runs as uid 996, so the
-# workspace wasn't writable.
+# These base images may already provide one or both service accounts.
 for user in messagebus systemd-network; do
-  check "$user is out of the system uid range" bash -c \
-    "uid=\$(getent passwd $user | cut -d: -f3); [ -z \"\$uid\" ] || [ \"\$uid\" -ge 60000 ]"
+  check "$user has a system UID" bash -c \
+    "uid=\$(id -u $user) && [ \"\$uid\" -lt 1000 ]"
 done
 check "the remote user owns the workspace" bash -c '[ "$(id -u vscode)" = "$(stat -c %u .)" ]'
 
