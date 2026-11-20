@@ -8,5 +8,11 @@
         "pairingAddress": "orca-test.example"
       }
     }
+  },
+  "bookworm": {
+    "image": "debian:bookworm-slim",
+    "features": {
+      "orca": {}
+    }
   }
 }

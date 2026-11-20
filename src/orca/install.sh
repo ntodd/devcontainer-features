@@ -45,17 +45,14 @@ pick() {
   return 1
 }
 
-# GTK pulls in dbus and systemd (through dconf's session bus), whose packages
-# add the messagebus and systemd-network system users. Left to themselves they
-# take uids like 996, and on a Foreman box the agent's own user can have that
-# uid: the devcontainer CLI then can't move the remote user onto it, so the
-# workspace isn't writable. Made here first, out of the system range, the
-# packages adopt them.
-for user in messagebus:60001:/nonexistent systemd-network:60002:/; do
-  name=${user%%:*} id=${user#*:} id=${id%%:*} home=${user##*:}
+# Bookworm's dbus postinst accepts an existing messagebus only in the
+# system UID range. Reserve low system IDs before apt runs so sysusers
+# cannot pick the high 990s used by older Foreman workspace owners.
+for name in messagebus systemd-network; do
   if ! getent passwd "$name" >/dev/null; then
-    getent group "$name" >/dev/null || groupadd --system --gid "$id" "$name"
-    useradd --system --uid "$id" --gid "$name" --no-create-home --home-dir "$home" \
+    getent group "$name" >/dev/null || groupadd --system -K SYS_GID_MAX=899 "$name"
+    case $name in messagebus) user_home=/nonexistent ;; systemd-network) user_home=/ ;; esac
+    useradd --system -K SYS_UID_MAX=899 --gid "$name" --no-create-home --home-dir "$user_home" \
       --shell /usr/sbin/nologin "$name"
   fi
 done
