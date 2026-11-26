@@ -158,5 +158,15 @@ check "'latest' option stages the latest release, using the port option" \
   '[ "$(current)" = 1.2.0 ] && [ -x "$ROOT/1.5.0/AppRun" ] && grep -q ":47124" "$W/out"'
 unlisten
 
+# 17. A rebuilt container keeps the runtime install (in the feature's volume)
+#     but gets a new HOME, without the skills: they're installed again, once.
+run
+before=$(skill_runs)
+rm -rf "$HOME"
+run
+check "reinstalls skills into a new HOME" '[ "$(skill_runs)" = $((before + 1)) ]'
+run
+check "and only once" '[ "$(skill_runs)" = $((before + 1)) ]'
+
 echo "$pass passed, $fail failed"
 [ "$fail" = 0 ]

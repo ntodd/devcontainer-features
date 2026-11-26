@@ -1,8 +1,8 @@
 {
   "id": "orca",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "name": "Orca runtime",
-  "description": "Runs the container's own headless Orca runtime (orca serve), installing and updating Orca in the user's home on every start, so a new Orca release takes a restart rather than an image rebuild.",
+  "description": "Runs the container's own headless Orca runtime (orca serve), installing and updating Orca on every start, so a new Orca release takes a restart rather than an image rebuild. Its pairings, repos, sessions and install are kept in a volume, so they survive a rebuild.",
   "documentationURL": "https://github.com/ntodd/devcontainer-features/tree/main/src/orca",
   "options": {
     "version": {
@@ -23,6 +23,13 @@
     }
   },
   "init": true,
+  "mounts": [
+    {
+      "source": "orca-state-${devcontainerId}",
+      "target": "/var/lib/orca-feature",
+      "type": "volume"
+    }
+  ],
   "postStartCommand": "/usr/local/bin/orca-serve || true",
   "installsAfter": [
     "ghcr.io/devcontainers/features/common-utils",

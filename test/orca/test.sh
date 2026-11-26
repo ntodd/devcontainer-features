@@ -1,7 +1,8 @@
 #!/bin/bash
 # The orca feature with default options, end to end: the real download from
-# GitHub, pairing mode on a fresh profile, supervised mode once a device has
-# connected, recovery after orcad is killed, and --restart.
+# GitHub, state in the feature's volume, pairing mode on a fresh profile,
+# supervised mode once a device has connected, recovery after orcad is killed,
+# and --restart. scripts/test-compose.sh covers a rebuild.
 #
 #   devcontainer features test --features orca --skip-scenarios \
 #     --base-image mcr.microsoft.com/devcontainers/base:debian .
@@ -25,6 +26,9 @@ check "init is PID 1" bash -c "ps -o args= -p 1 | grep -q docker-init"
 check "orca-serve is on PATH" bash -c '[ "$(command -v orca-serve)" = /usr/local/bin/orca-serve ]'
 check "options file is installed" grep -q "^ORCA_DEFAULT_PORT='6768'$" /usr/local/share/orca-feature/options
 check "Xvfb is installed" bash -c "command -v Xvfb"
+check "the state volume is mounted" mountpoint -q /var/lib/orca-feature
+check "/etc/machine-id is kept in the state volume" bash -c \
+  '[ "$(readlink /etc/machine-id)" = /var/lib/orca-feature/machine-id ] && grep -Eqx "[0-9a-f]{32}" /etc/machine-id'
 
 # These base images may already provide one or both service accounts.
 for user in messagebus systemd-network; do
@@ -40,6 +44,12 @@ check "latest release is installed" bash -c "[ -x '$RR/current/AppRun' ]"
 check "orca CLI on PATH runs the installed version" bash -c \
   '[ "$(orca --version 2>/dev/null | head -1)" = "$(basename "$(readlink '"$RR"'/current)")" ]'
 check "fresh profile starts in pairing mode" grep -q '^Pairing URL: orca://pair' "$LOG"
+check "Orca's state is in the volume, private to the user" bash -c '
+  v=/var/lib/orca-feature/$(id -un)
+  [ "$(stat -c %a "$v")" = 700 ] &&
+    [ "$(readlink -f ~/.config/orca)" = "$v/config" ] &&
+    [ "$(readlink -f ~/.orca)" = "$v/data" ] &&
+    [ "$(readlink -f ~/.local/share/orca-runtime)" = "$v/runtime" ]'
 
 # Pretend the desktop has paired, then restart: now supervised.
 sed -i -E 's/"lastSeenAt": *0/"lastSeenAt":1792252400000/' "$HOME/.config/orca/orca-devices.json"

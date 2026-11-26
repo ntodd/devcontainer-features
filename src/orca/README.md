@@ -1,7 +1,7 @@
 
 # Orca runtime (orca)
 
-Runs the container's own headless Orca runtime (orca serve), installing and updating Orca in the user's home on every start, so a new Orca release takes a restart rather than an image rebuild.
+Runs the container's own headless Orca runtime (orca serve), installing and updating Orca on every start, so a new Orca release takes a restart rather than an image rebuild. Its pairings, repos, sessions and install are kept in a volume, so they survive a rebuild.
 
 ## Example Usage
 
@@ -24,10 +24,11 @@ Runs the container's own headless Orca runtime (orca serve), installing and upda
 Orca isn't baked into the image. On every container start, `orca-serve` (the
 feature's `postStartCommand`):
 
-1. Installs or updates Orca in `~/.local/share/orca-runtime/<version>`, verified
-   against the release's sha512, with `current` pointing at the active one. It
-   tracks the latest release, which is what the desktop app auto-updates to, so
-   a new Orca release takes a restart rather than an image rebuild.
+1. Installs or updates Orca in `~/.local/share/orca-runtime/<version>` (in the
+   feature's volume, see State and rebuilds), verified against the release's
+   sha512, with `current` pointing at the active one. It tracks the latest
+   release, which is what the desktop app auto-updates to, so a new Orca
+   release takes a restart rather than an image rebuild.
 2. Starts `orca serve`, in pairing mode or supervised (see Pairing).
 
 Updates only take effect while nothing is serving. One found while the runtime
@@ -97,14 +98,56 @@ it again, taking any staged update. It kills running agents. Use it rather than
 `pkill -f <path>` over ssh: that pattern is on the ssh shell's own command line,
 so it kills your session too.
 
-## After a rebuild
+## State and rebuilds
 
-`$HOME` is usually a named volume, so a rebuilt container finds whatever the
-last one's runtime left in the profile. When nothing is serving, `orca-serve`
-treats all of it as stale: it kills orphaned runtime processes, removes the
-`Singleton*` files, `orcad.lock` and `o-*.sock`, and starts the supervised
-runtime with `--force`, so the supervisor's give-up record (6 failures in 15
-minutes) from the old container doesn't stop the new one.
+A rebuild discards `$HOME` unless the repo mounts it as a volume, and with it
+Orca's keypair and paired devices: every client would have to pair again. So
+the feature mounts a volume of its own per environment,
+`orca-state-${devcontainerId}`, at `/var/lib/orca-feature`, and `orca-serve`
+keeps Orca's state there, in a directory only the remote user can open (0700),
+with links at the paths Orca and its CLI use:
+
+| In `/var/lib/orca-feature` | Linked from | |
+|---|---|---|
+| `<user>/config` | `~/.config/orca` | Orca's profile: the E2EE keypair, paired devices, the runtime's id, repos, worktrees and sessions |
+| `<user>/data` | `~/.orca` | Orca's credential directory |
+| `<user>/runtime` | `~/.local/share/orca-runtime` | The runtime install, so a rebuild doesn't download it again |
+| `machine-id` | `/etc/machine-id` | See below |
+
+Orca is given the profile's real path (`ORCA_USER_DATA_PATH`); it has no such
+setting for `~/.orca`, which is why that one is a link. The mount point lets
+anyone create in it, like `/tmp`, because the remote user's uid can change
+after the image is built (`updateRemoteUserUID`).
+
+After a rebuild a paired client reconnects without pairing again, and its
+repos and sessions are still there. A device has connected, so the runtime
+starts supervised and prints no offer; `orca-serve --pair` makes one as usual.
+Rebuilding keeps the volume; removing the environment (`docker compose down
+-v`, or destroying it in Foreman) removes it.
+
+**Machine ID.** Orca seals the credentials it saves (integration API keys and
+tokens) with a key mixed with `/etc/machine-id`. The feature's packages
+generate that id in its image layer, so it would change whenever the layer is
+rebuilt (a new feature version, a pruned build cache), and saved credentials
+would no longer open. The feature keeps the id at
+`/var/lib/orca-feature/machine-id` instead, with `/etc/machine-id` a link to
+it: a new volume starts with the image's copy and keeps it from then on.
+
+**Moving in.** The first start with the volume moves state already in `$HOME`
+into it once, so a repo whose `$HOME` is a volume keeps its pairings. If the
+volume already has a profile, the volume's wins, and the one in `$HOME` is set
+aside as `~/.config/orca.before-volume-<time>`; `orca-serve` says where.
+
+**Without the volume.** If nothing is mounted at `/var/lib/orca-feature`, or
+the remote user can't make its directory there, `orca-serve` says so in one
+line and keeps the state in `$HOME`, as before.
+
+**Stale state.** A rebuilt container finds whatever the last one's runtime
+left in the profile. When nothing is serving, `orca-serve` treats all of it as
+stale: it kills orphaned runtime processes, removes the `Singleton*` files,
+`orcad.lock` and `o-*.sock`, and starts the supervised runtime with `--force`,
+so the supervisor's give-up record (6 failures in 15 minutes) from the old
+container doesn't stop the new one.
 
 ## Runtime overrides
 
@@ -117,6 +160,7 @@ Environment variables override the options at runtime:
 | `ORCA_PAIRING_ADDRESS` | Advertised address |
 | `ORCA_ALLOW_DOWNGRADE=1` | Allow moving to an older version |
 | `ORCA_PAIRING=1` / `ORCA_MOBILE_PAIRING=1` | Start in pairing mode |
+| `ORCA_STATE_VOLUME` | Where the state volume is mounted; empty keeps Orca's state in `$HOME` |
 
 ## Foreman environments
 

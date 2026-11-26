@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Unit tests for src/orca/orca-serve.sh: what it clears and how it starts the
-# runtime, against a fake runtime and a stubbed orca-install.sh. HOME is a
-# named volume in a devcontainer, so state the last container's runtime left
-# there is still around when a rebuilt one starts. Linux only, like the
-# script, and needs python3:
+# runtime, against a fake runtime and a stubbed orca-install.sh. The profile
+# outlives the container (in the feature's volume, or a HOME that is one), so
+# state the last container's runtime left there is still around when a rebuilt
+# one starts. Linux only, like the script, and needs python3:
 #
 #   bash test/orca/unit/test-orca-serve.sh
 set -u
@@ -22,6 +22,8 @@ export HOME="$W/home"
 export ORCA_RUNTIME_ROOT="$W/root"
 export ORCA_SERVE_PORT=47124
 export ORCA_PAIRING_ADDRESS=env-1
+# State in HOME, as without the feature's volume (test-orca-state.sh covers it).
+export ORCA_STATE_VOLUME=
 CFG="$HOME/.config/orca"
 ARGS="$W/apprun.args"
 
