@@ -11,8 +11,9 @@
 # and its userspace tailscaled hands inbound tailnet connections to
 # 127.0.0.1:<port>, which the runtime's 0.0.0.0 bind covers.
 #
-# orca-install.sh keeps the runtime in the home volume and up to date, so a new
-# Orca release takes a restart rather than an image rebuild.
+# orca-install.sh keeps the runtime up to date, so a new Orca release takes a
+# restart rather than an image rebuild. It and the rest of Orca's state live in
+# the feature's volume (see place_state), so a rebuild keeps them.
 #
 # --no-sandbox: the Electron chrome-sandbox helper is not setuid here.
 # --supervise: restarts the server with growing delays if it dies. After 6
@@ -48,25 +49,154 @@ if [ -z "$PAIRING_ADDRESS" ]; then
   PAIRING_ADDRESS=127.0.0.1
   echo "orca-serve: no pairing address (pairingAddress option, ORCA_PAIRING_ADDRESS or TS_HOSTNAME); advertising 127.0.0.1" >&2
 fi
-RUNTIME_ROOT="${ORCA_RUNTIME_ROOT:-$HOME/.local/share/orca-runtime}"
+# Orca's state: its profile (~/.config/orca: the E2EE keypair, paired devices,
+# repos, sessions), its credential directory (~/.orca) and the runtime install.
+# The feature mounts a volume per environment at /var/lib/orca-feature, and
+# place_state (below) keeps all three in a directory of it private to this
+# user, with links to it at those paths, so a rebuild keeps them whatever the
+# repo does with HOME. Without a usable volume they stay in HOME, as Orca has
+# them. ORCA_STATE_VOLUME moves the volume; empty keeps everything in HOME.
+STATE_VOLUME=${ORCA_STATE_VOLUME-/var/lib/orca-feature}
+HOME_CFG="$HOME/.config/orca"
+HOME_DATA="$HOME/.orca"
+HOME_RUNTIME="$HOME/.local/share/orca-runtime"
+# Set by hand, or inherited from the orca-serve that started the runtime this
+# runs under (one of its terminals, or a pairing watcher): used as they are.
+OWN_CFG=${ORCA_USER_DATA_PATH:-}
+OWN_RUNTIME=${ORCA_RUNTIME_ROOT:-}
+CFG=${OWN_CFG:-$HOME_CFG}
+RUNTIME_ROOT=${OWN_RUNTIME:-$HOME_RUNTIME}
+PRIVATE=
+if [ -n "$STATE_VOLUME" ] && [ -d "$STATE_VOLUME" ]; then
+  PRIVATE="$(cd "$STATE_VOLUME" && pwd -P)/$(id -un 2>/dev/null || id -u)"
+fi
 LOG="$HOME/orca-serve.log"
 
-DEVICES="$HOME/.config/orca/orca-devices.json"
+DEVICES="$CFG/orca-devices.json"
 STATE="$HOME/.local/state/orca-feature"
 WATCHER="$STATE/pairing-watch.pid"
+
+# What a runtime of this environment runs from, wherever its state is or was:
+# the runtime install, and the orcad that serve deploys into the profile with
+# its own Node and detaches (parent PID 1). Orca is given the volume's paths
+# as they are, so its processes name them, not the links in HOME. Matched on
+# paths rather than process names, so nothing else named orca-ide is caught.
+runtime_paths() {
+  printf '%s\n' "$RUNTIME_ROOT/" "$CFG/orcad-artifacts/" "$HOME_RUNTIME/" "$HOME_CFG/orcad-artifacts/"
+  [ -z "$PRIVATE" ] || printf '%s\n' "$PRIVATE/runtime/" "$PRIVATE/config/orcad-artifacts/"
+}
+
+signal_runtime() {
+  local path
+  while IFS= read -r path; do
+    pkill "-$1" -f -- "$path" 2>/dev/null
+  done < <(runtime_paths | sort -u)
+  return 0
+}
+
+runtime_running() {
+  local path
+  while IFS= read -r path; do
+    pgrep -f -- "$path" >/dev/null && return 0
+  done < <(runtime_paths | sort -u)
+  return 1
+}
 
 # Stops this environment's runtime. TERM first so orcad releases its instance
 # lock cleanly.
 stop_runtime() {
-  pkill -TERM -f -- "$RUNTIME_ROOT/" 2>/dev/null
-  pkill -TERM -f -- "$HOME/.config/orca/orcad-artifacts/" 2>/dev/null
+  signal_runtime TERM
   for _ in $(seq 1 15); do
     (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null || break
     sleep 1
   done
-  pkill -9 -f -- "$RUNTIME_ROOT/" 2>/dev/null
-  pkill -9 -f -- "$HOME/.config/orca/orcad-artifacts/" 2>/dev/null
+  signal_runtime 9
   sleep 1
+}
+
+# Why the volume can't hold the state, or nothing if it can. It has to be
+# mounted: state written to a bare directory goes with the container too, and
+# a HOME that is a volume would have kept it. The mount point lets anyone
+# create in it, like /tmp (install.sh, and a new volume starts as the image's
+# directory), so this works whatever uid the remote user ends up with; the
+# directory made in it is this user's alone.
+volume_problem() {
+  if [ -z "$PRIVATE" ] || ! mountpoint -q "$STATE_VOLUME"; then
+    echo "no volume is mounted at $STATE_VOLUME"
+  elif [ ! -e "$PRIVATE" ] && [ ! -L "$PRIVATE" ] && ! mkdir -m 700 "$PRIVATE" 2>/dev/null; then
+    echo "can't create $PRIVATE"
+  elif [ ! -d "$PRIVATE" ] || [ -L "$PRIVATE" ] || [ ! -O "$PRIVATE" ] ||
+    ! chmod 700 "$PRIVATE" 2>/dev/null || [ ! -w "$PRIVATE" ]; then
+    echo "$PRIVATE isn't a directory of this user's"
+  fi
+}
+
+# Puts $1, a path in HOME, at $2 in the volume, with a link to it left at $1.
+# A directory at $1 is state from before the volume (a HOME that was itself a
+# volume), or from a start that couldn't use it. It moves in once, by way of
+# $1.moving so an interrupted move picks up where it stopped. If the volume
+# already has its own, that one wins and $1 is set aside, or removed when $3
+# is "discard" (a runtime install, which is only a download).
+into_volume() {
+  local home=$1 vol=$2 aside
+  rm -rf "$vol.partial"
+  if [ -d "$home" ] && [ ! -L "$home" ]; then
+    if [ ! -e "$vol" ]; then
+      mv -T "$home" "$home.moving" || return 1
+    elif [ "$3" = discard ]; then
+      rm -rf "$home"
+    else
+      aside="$home.before-volume-$(date -u +%Y%m%dT%H%M%SZ)"
+      mv -T "$home" "$aside" || return 1
+      echo "orca-serve: $vol already has Orca's state, so $home is set aside as $aside" >&2
+    fi
+  fi
+  if [ -d "$home.moving" ]; then
+    if [ ! -e "$vol" ]; then
+      if ! { cp -a "$home.moving" "$vol.partial" && mv -T "$vol.partial" "$vol"; }; then
+        rm -rf "$vol.partial"
+        mv -T "$home.moving" "$home"
+        echo "orca-serve: couldn't move $home into $vol; it stays in HOME for now" >&2
+        return 1
+      fi
+      echo "orca-serve: moved $home into $vol" >&2
+    fi
+    rm -rf "$home.moving"
+  fi
+  [ -d "$vol" ] || mkdir -m 700 "$vol" || return 1
+  mkdir -p "${home%/*}" && ln -sfn "$vol" "$home"
+}
+
+# Keeps Orca's state in the volume when it can, else in HOME, saying so once.
+# Only while nothing runs from it: it moves directories.
+place_state() {
+  local why path
+  [ -n "$STATE_VOLUME" ] || return 0
+  why=$(volume_problem)
+  if [ -n "$why" ]; then
+    echo "orca-serve: keeping Orca's state in $HOME, which a rebuild discards: $why" >&2
+    # Links an earlier start made into the volume, which can't be used now.
+    for path in "$HOME_CFG" "$HOME_DATA" "$HOME_RUNTIME"; do
+      [ -L "$path" ] || continue
+      case $(readlink "$path") in
+        "$STATE_VOLUME"/* | "${PRIVATE:-/nonexistent}"/*) rm -f "$path" ;;
+      esac
+    done
+    return 0
+  fi
+  # Orca has a setting for where its profile is, so it gets the volume's path.
+  # Its credential directory is always ~/.orca, which is why the links are
+  # there; the one at ~/.config/orca is for the orca CLI in a shell here.
+  if [ -z "$OWN_CFG" ] && into_volume "$HOME_CFG" "$PRIVATE/config" keep; then
+    CFG="$PRIVATE/config"
+    export ORCA_USER_DATA_PATH="$CFG"
+  fi
+  into_volume "$HOME_DATA" "$PRIVATE/data" keep
+  if [ -z "$OWN_RUNTIME" ] && into_volume "$HOME_RUNTIME" "$PRIVATE/runtime" discard; then
+    RUNTIME_ROOT="$PRIVATE/runtime"
+    export ORCA_RUNTIME_ROOT="$RUNTIME_ROOT"
+  fi
+  DEVICES="$CFG/orca-devices.json"
 }
 
 # An offer's code is base64url JSON; the device it pairs is its pairedDeviceId.
@@ -81,8 +211,8 @@ offer_device() {
 }
 
 # A process's start time, which with its pid tells it apart from a later
-# process given the same pid. The pid file is in HOME, a volume that outlives
-# the container and its processes.
+# process given the same pid. The pid file is in HOME, which can be a volume
+# that outlives the container and its processes.
 proc_start() {
   local stat
   stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
@@ -221,8 +351,7 @@ fi
 # to bind. If one exists, give it time before treating it as an orphan, or a
 # second start during boot (a manual run right after postStart, say) kills it
 # and starts over.
-if pgrep -f -- "$RUNTIME_ROOT/" >/dev/null ||
-  pgrep -f -- "$HOME/.config/orca/orcad-artifacts/" >/dev/null; then
+if runtime_running; then
   for _ in $(seq 1 30); do
     if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
       echo "orca runtime already listening on :$PORT"
@@ -234,23 +363,21 @@ fi
 
 # Nothing is serving, so anything still running from this runtime is an orphan,
 # and every lock and socket a runtime keeps in the profile is stale: the
-# Singleton* files, orcad's lock and its o-*.sock sockets. They live in $HOME,
-# usually a named volume, so they outlive the container that wrote them. A
-# rebuilt container shares the host's kernel, so orcad's lock even has the right
-# boot id, and the dead process's pid can belong to something else by now: every
-# launch then exits as if another runtime held the profile, and the runtime
-# never comes up. These cleanups are safe only because the port check above
-# failed. Matched on paths rather than process names, so nothing else named
-# orca-ide is caught: the runtime root, and orcad, which serve deploys into the
-# profile with its own Node and detaches (parent PID 1).
+# Singleton* files, orcad's lock and its o-*.sock sockets. The profile is in
+# the feature's volume (or a HOME that is one), so they outlive the container
+# that wrote them. A rebuilt container shares the host's kernel, so orcad's
+# lock even has the right boot id, and the dead process's pid can belong to
+# something else by now: every launch then exits as if another runtime held the
+# profile, and the runtime never comes up. These cleanups, and moving the state
+# into the volume, are safe only because the port check above failed.
 stop_watcher
-pkill -9 -f -- "$RUNTIME_ROOT/" 2>/dev/null || true
-pkill -9 -f -- "$HOME/.config/orca/orcad-artifacts/" 2>/dev/null || true
-rm -f "$HOME/.config/orca/SingletonLock" \
-      "$HOME/.config/orca/SingletonSocket" \
-      "$HOME/.config/orca/SingletonCookie" \
-      "$HOME/.config/orca/orcad.lock" \
-      "$HOME/.config/orca"/o-*.sock
+signal_runtime 9
+place_state
+rm -f "$CFG/SingletonLock" \
+      "$CFG/SingletonSocket" \
+      "$CFG/SingletonCookie" \
+      "$CFG/orcad.lock" \
+      "$CFG"/o-*.sock
 
 # Install or update before starting. Nothing is serving, so this is the one
 # point where switching versions can't split the server from the CLI it hands
@@ -282,8 +409,7 @@ SERVE_ARGS=(--no-sandbox --port "$PORT" --pairing-address "$PAIRING_ADDRESS")
 if [ -n "${ORCA_MOBILE_PAIRING:-}" ]; then
   SERVE_ARGS+=(--mobile-pairing)
   mode=pairing
-elif [ -n "${ORCA_PAIRING:-}" ] ||
-  ! grep -Eqs '"lastSeenAt": *[1-9]' "$HOME/.config/orca/orca-devices.json"; then
+elif [ -n "${ORCA_PAIRING:-}" ] || ! grep -Eqs '"lastSeenAt": *[1-9]' "$DEVICES"; then
   mode=pairing
 else
   SERVE_ARGS+=(--supervise --force)

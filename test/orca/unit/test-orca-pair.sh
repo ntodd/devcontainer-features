@@ -18,6 +18,8 @@ export HOME="$W/home"
 export ORCA_RUNTIME_ROOT="$W/root"
 export ORCA_SERVE_PORT=47125
 export ORCA_PAIRING_ADDRESS=env-1
+# State in HOME, as without the feature's volume (test-orca-state.sh covers it).
+export ORCA_STATE_VOLUME=
 export ORCA_PAIRING_WAIT=10
 export ORCA_PAIRING_WATCH_INTERVAL=0.2
 CFG="$HOME/.config/orca"

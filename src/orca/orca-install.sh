@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Install or update this environment's Orca runtime in the home volume, so a new
-# Orca release takes a restart rather than an image rebuild.
+# Install or update this environment's Orca runtime in ORCA_RUNTIME_ROOT, which
+# orca-serve points at the feature's volume (else ~/.local/share/orca-runtime),
+# so a new Orca release takes a restart rather than an image rebuild, and a
+# rebuild doesn't download it again.
 #
 # Tracks the latest GitHub release, which is what the Mac auto-updates to.
 # ORCA_VERSION holds a specific version instead (say, while a release is bad).
@@ -135,11 +137,14 @@ done
 
 # So agents in here use `orca worktree create` and Orca terminals rather than raw
 # git worktrees, which Orca hides. Matched to the build, so redone on a switch.
-# Best effort: retried on the next start if npx or the network fails.
-if [ "$(cat "$ROOT/.skills-version" 2>/dev/null)" != "$current" ]; then
+# Best effort: retried on the next start if npx or the network fails. The
+# record of it is in HOME, with the skills: the runtime can outlive HOME (in
+# the feature's volume), and a new HOME needs them again.
+skills_mark="$HOME/.local/state/orca-feature/skills-version"
+if [ "$(cat "$skills_mark" 2>/dev/null)" != "$current" ]; then
   if "$ROOT/current/resources/bin/orca-ide" skills install \
     --skill orca-cli --skill orchestration --agent claude-code,codex; then
-    echo "$current" >"$ROOT/.skills-version"
+    mkdir -p "${skills_mark%/*}" && echo "$current" >"$skills_mark"
   else
     log "skills install failed; will retry on the next start"
   fi

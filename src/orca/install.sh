@@ -11,6 +11,7 @@
 #   - orca-serve and orca-install under /usr/local/share/orca-feature, with
 #     orca-serve on PATH
 #   - orca and orca-ide on PATH, pointing into the remote user's install
+#   - the state volume's mount point, and /etc/machine-id kept in it
 #   - Foreman's connect hook, so a Foreman environment's page can pair Orca
 #     clients (inert anywhere else)
 set -eu
@@ -83,6 +84,29 @@ system_users | grep -vxF "$users_before" | grep -v "^${_REMOTE_USER:-}=" |
   while read -r user; do
     echo "orca feature: warning: a package added system user $user, which can stop the devcontainer CLI giving the remote user that uid" >&2
   done
+
+# --- state volume -----------------------------------------------------------
+
+# The feature mounts a volume per environment here, and orca-serve keeps Orca's
+# profile, credentials and runtime install in it, in a directory private to
+# the remote user, so a rebuild keeps them whatever the repo does with HOME.
+# A new volume starts as a copy of this directory, mode included. Anyone may
+# create in it, like /tmp, because the remote user's uid is only settled after
+# this (updateRemoteUserUID).
+state=/var/lib/orca-feature
+mkdir -p "$state"
+chmod 1777 "$state"
+
+# Orca seals the credentials it saves with a key mixed with /etc/machine-id.
+# The packages above generate that id in this image layer, so a rebuild that
+# rebuilds the layer (a new feature version, a pruned build cache) gets a new
+# one, and saved credentials no longer open. Keep the id in the state volume
+# instead: a new volume starts with this one, and keeps it from then on.
+# Without the volume, /etc/machine-id reads this copy, as it did before.
+if [ -s /etc/machine-id ] && [ ! -L /etc/machine-id ]; then
+  install -m 0444 /etc/machine-id "$state/machine-id"
+  ln -sf "$state/machine-id" /etc/machine-id
+fi
 
 # --- scripts ----------------------------------------------------------------
 
